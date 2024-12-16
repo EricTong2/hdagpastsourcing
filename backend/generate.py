@@ -60,19 +60,6 @@ def setup_pinecone_index(cases_df):
     
     return vectorstore
 
-# somewhat temporary function to get the best matched price by looking at the first case in similar cases, could be improved
-# noticable flaw for companies that we quote with 0
-def get_best_matched_price(retrieved_cases):
-    similar_cases = [
-        {"Case Name": doc.metadata["Case Name"], "Quoted Price": float(doc.metadata["Quoted Price"])}
-        for doc in retrieved_cases
-        if "Quoted Price" in doc.metadata and doc.metadata["Quoted Price"]
-    ]
-    
-    if similar_cases:
-        return similar_cases[0]["Quoted Price"]
-    return None
-
 # generate email for compnay based on company_info and similar cases
 def generate_email(company_info, retriever):
     company_text = f"""
@@ -88,8 +75,6 @@ def generate_email(company_info, retriever):
         f"Case Name: {doc.metadata['Case Name']}, Outcome: {doc.metadata['Outcome']}, Quoted Price: {doc.metadata['Quoted Price']}"
         for doc in retrieved_cases
     ])
-
-    best_match_price = get_best_matched_price(retrieved_cases)
 
     prompt_template = """
     You are a sourcing analyst for a Data Analytics Consulting Group at Harvard College. You have been tasked with reaching out to a client and providing an email to introduce our services. You have access to a database of case studies from previous clients.
@@ -148,11 +133,6 @@ def process_companies_and_generate_emails(companies_filepath, retriever):
     # save to generated_emails.csv
     emails_df = pd.DataFrame(emails)
     emails_df.to_csv("generated_emails.csv", index=False)
-
-def process_single_company(company_info, retriever):
-    email_content = generate_email(company_info, retriever)
-    print(f"Email for {company_info.get('Company Name', 'the company')}:\n")
-    print(email_content)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate emails for companies.')
