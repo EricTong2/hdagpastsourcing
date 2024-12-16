@@ -1,11 +1,13 @@
 import os
-import argparse
-from dotenv import load_dotenv
+import json
+import base64
+import awswrangler as wr
 import pandas as pd
-from pinecone import Pinecone, ServerlessSpec
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI 
-from langchain_pinecone import Pinecone as PineconeVectorStore
-from langchain.prompts import PromptTemplate
+from io import StringIO
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.chat_models import ChatOpenAI
+from langchain.vectorstores import Pinecone as PineconeVectorStore
+from langchain.prompts.prompt import PromptTemplate
 
 load_dotenv()
 
@@ -14,28 +16,11 @@ pinecone_api_key = os.getenv("PINECONE_API_KEY")
 
 os.environ["OPENAI_API_KEY"] = openai_api_key
 
-pc = Pinecone(api_key=pinecone_api_key)
+# Pinecone setup
+from pinecone import Pinecone, ServerlessSpec
+pc = Pinecone(api_key=PINECONE_API_KEY)
 
 index_name = "case-study-index"
-
-def load_and_process_data(filepath):
-    cases_df = pd.read_csv(filepath)
-    cases_df["combined_text"] = cases_df.apply(
-        lambda row: (
-            f"Case Name: {row['Case Name']}. "
-            f"Semester: {row['Semester']}. "
-            f"Company Name: {row['Company Name']}. "
-            f"Description: {row['Detailed Case Description']}. "
-            f"Outcome: {row['Outcome']}. "
-            f"Tech Stack: {row['Tech Stack']}. "
-            f"KPI: {row['KPIs']}. "
-            f"Quoted Price: {row['Quoted Price']}."
-        ),
-        axis=1
-    )
-
-    cases_df = transform_webscraped_df(cases_df)
-    return cases_df
 
 def setup_pinecone_index(cases_df):
     embeddings = OpenAIEmbeddings()
@@ -112,52 +97,48 @@ def generate_email(company_info, retriever):
     
     return response.content
 
-# process csv of companies and generate emails for each company
-def process_companies_and_generate_emails(companies_filepath, retriever):
-    companies_df = pd.read_csv(companies_filepath)
+def lambda_handler(event, context):
+    """AWS Lambda handler function."""
+    try:
+        # Decode the base64-encoded CSV file
+        file_content = base64.b64decode(event["body"]).decode("utf-8")
+        companies_df = pd.read_csv(StringIO(file_content))
 
-    emails = []
-    for _, row in companies_df.iterrows():
-        company_info = {
-            "Company Name": row.get("Company Name for Emails", ""),
-            "Industry": row.get("Industry", ""),
-            "Technologies": row.get("Technologies", ""),
-            "Keywords": row.get("Keywords", "")
+        # Load case study data (can be stored in S3 for better scalability)
+        case_study_s3_path = "s3://your-bucket/case-study-data.csv"
+        cases_df = wr.s3.read_csv(case_study_s3_path)
+
+        # Prepare Pinecone retriever
+        vectorstore = setup_pinecone_index(cases_df)
+        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+
+        # Generate emails
+        emails = []
+        for _, row in companies_df.iterrows():
+            company_info = {
+                "Company Name": row.get("Company Name for Emails", ""),
+                "Industry": row.get("Industry", ""),
+                "Technologies": row.get("Technologies", ""),
+                "Keywords": row.get("Keywords", "")
+            }
+            email_content = generate_email(company_info, retriever)
+            emails.append({"Company Name": row["Company Name for Emails"], "Email Content": email_content})
+
+        # Convert results to CSV
+        emails_df = pd.DataFrame(emails)
+        output_csv = StringIO()
+        emails_df.to_csv(output_csv, index=False)
+        output_csv.seek(0)
+
+        # Return the CSV as the response
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "text/csv"},
+            "body": output_csv.getvalue()
         }
 
-        email_content = generate_email(company_info, retriever)
-        emails.append({
-            "Company Name": row.get("Company Name for Emails", ""),
-            "Email Content": email_content
-        })
-    # save to generated_emails.csv
-    emails_df = pd.DataFrame(emails)
-    emails_df.to_csv("generated_emails.csv", index=False)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Generate emails for companies.')
-    parser.add_argument('--company', action='store_true', help='Generate email for a single company.')
-    parser.add_argument('--company_name', type=str, help='Company Name')
-    parser.add_argument('--industry', type=str, help='Industry')
-    parser.add_argument('--technologies', type=str, help='Technologies')
-    parser.add_argument('--keywords', type=str, help='Keywords')
-    parser.add_argument('--companies_file', type=str, default='companies.csv', help='CSV file containing companies information')
-    args = parser.parse_args()
-
-    # temporary dummy data filepath
-    cases_df = load_and_process_data("dummy_data.csv")
-
-    vectorstore = setup_pinecone_index(cases_df)
-
-    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 3})
-
-    if args.company:
-        company_info = {
-            "Company Name": args.company_name or "",
-            "Industry": args.industry or "",
-            "Technologies": args.technologies or "",
-            "Keywords": args.keywords or ""
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
         }
-        process_single_company(company_info, retriever)
-    else:
-        process_companies_and_generate_emails(args.companies_file, retriever)
